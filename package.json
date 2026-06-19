@@ -1,0 +1,20 @@
+{
+  "name": "@pipeworx/mcp-japan-law",
+  "version": "0.1.0",
+  "description": "Japan Law MCP — Japanese national laws & ordinances via the e-Gov Law API.",
+  "type": "module",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "keywords": ["mcp", "mcp-server", "model-context-protocol", "pipeworx", "japan-law"],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/pipeworx-io/mcp-japan-law"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.0"
+  }
+}
