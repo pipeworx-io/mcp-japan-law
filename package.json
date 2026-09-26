@@ -1,6 +1,6 @@
 {
   "name": "@pipeworx/mcp-japan-law",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Japan Law MCP — Japanese national laws & ordinances via the e-Gov Law API.",
   "type": "module",
   "main": "src/index.ts",
@@ -26,7 +26,7 @@
     "@cloudflare/workers-types": "^4.20260405.1"
   },
   "pipeworx": {
-    "sourceHash": "v1-8ddcabcdd387a676d2dfebb2b2df73feaad3c72397f7114274b9079e95458249",
-    "sourceCommit": "70cd53748fc9f9a43ed3681d751bfa96e701efd2"
+    "sourceHash": "v1-d1e55a34c1d42e6e477b93c1b5a8395cb19325e2ce930bbf3e5ddabcb6986fc0",
+    "sourceCommit": "1064560fd9dcd0d6fc2606298c2ba244b3a1fbeb"
   }
 }
