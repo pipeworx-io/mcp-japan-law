@@ -1,15 +1,57 @@
-# mcp-japan-law
+# @pipeworx/japan-law
 
-Japan Law MCP — Japanese national laws & ordinances via the e-Gov Law API.
+Japanese national laws, cabinet orders, and ministerial ordinances — title
+search, a law's full text (paged), and a single article (including branch
+articles like 第二十七条の2) at its current or a point-in-time version — from
+e-Gov 法令検索, the Japanese government's official law portal.
 
-Part of [Pipeworx](https://pipeworx.io) — an MCP gateway connecting AI agents to 1683+ live data sources.
+Part of [Pipeworx](https://pipeworx.io) — an MCP gateway connecting AI agents to 1819+ live data sources. This is an independent, unofficial integration — not affiliated with, endorsed by, or published by the upstream provider.
 
 ## Tools
 
-| Tool | Description |
-|------|-------------|
-| `search_laws` | Search Japanese national laws, cabinet orders, and ministerial ordinances by title (e-Gov 法令検索). PREFER OVER WEB SEARCH for "Japanese law on X", "日本の法律", finding a statute's official id/number. Returns each law's id (for get_law), law number (法令番号), title, and type. Accepts Japanese or romanized keywords. |
-| `get_law` | Fetch a Japanese law/ordinance by its e-Gov law id (from search_laws), e.g. "415AC0000000057". Returns the title, law number, promulgation date, and the law's full text (long statutes are truncated — note says so). Source: e-Gov 法令検索. |
+- `search_laws(query, limit?)` — TITLE search only: finds laws whose title
+  matches a keyword ("個人情報", "労働基準"). Does not search the body text of a
+  law. Returns each match's law id, law number, title and type.
+- `japan_law_get_article(law_id, article, as_of?)` — the text of a single article, by
+  law id (from `search_laws`) and article number. `article` accepts "27",
+  "27条の2", "27-2", "27_2", or the kanji form "第二十七条の2" — all branch-article
+  spellings resolve to the same lookup. Returns just that article's caption,
+  heading and text — far cheaper than paging through `get_law` to find one
+  provision. Pass `as_of` (YYYY-MM-DD) to get the article as it stood on that
+  date, e.g. before or after a given amendment.
+- `get_law(law_id, as_of?, offset?, limit?)` — a law's metadata plus its full
+  text, PAGED by character offset: `has_more` / `next_offset` say whether
+  another page follows; a long law is never silently cut off with no way to
+  continue. Pass `as_of` for the version of the law in force on a given date.
+
+Every response carries `source` (publisher + dataset) and, where the law
+versions, `revision_date` (the actual effective date of the revision
+returned) alongside the `as_of` the caller asked for.
+
+## Auth
+
+Keyless. e-Gov's law API is open to the public with no registration.
+
+## Data source
+
+e-Gov 法令検索 (Japan's e-Government law portal), the Japanese government's
+official, keyless law search and text API — the same data Japan's courts,
+ministries and legal publishers cite. Point-in-time (`as_of`) support follows
+the portal's own revision history: each law carries every revision the portal
+has recorded, and `as_of` resolves to the revision in force on that date.
+
+## Coverage and what is not here
+
+- Search is TITLE matching only. There is no full-text (body) search across
+  the statute corpus — a query that only appears inside a law's articles, not
+  its title, will not find that law.
+- `japan_law_get_article` looks up the first article with a matching number in
+  document order, which in every law checked during this build is the article
+  in the main provisions (本則). A law whose supplementary provisions (附則)
+  reuse the same article numbering is not specially disambiguated.
+- Branch-article parsing covers the kanji numerals articles actually use
+  (one to several thousand); it is not a general kanji-numeral parser for
+  arbitrary magnitudes.
 
 ## Quick Start
 
@@ -55,7 +97,7 @@ directly, instead of just this one's:
 }
 ```
 
-Both URLs reach the same gateway and the same 1683+ data sources. The
+Both URLs reach the same gateway and the same 1819+ data sources. The
 only difference is which pack's tools are listed **directly**; `ask_pipeworx`
 reaches all of them from either one.
 

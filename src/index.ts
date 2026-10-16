@@ -674,13 +674,16 @@ function collapse(s: string): string {
  * Japan Law MCP — Japanese national laws & ordinances via the e-Gov Law API.
  *
  * e-Gov 法令検索 (laws.e-gov.go.jp) REST/JSON API v2, keyless. Search the body
- * of Japanese statutes, cabinet orders, and ministerial ordinances, and fetch
- * the full text of any law. (Parity with japan-public-ledgers' ordinance domain
- * — the live data, minus the stateful change-ledger.)
+ * of Japanese statutes, cabinet orders, and ministerial ordinances, fetch a
+ * single article (including branch articles like 第二十七条の2), fetch the
+ * full text of a law in pages, and retrieve point-in-time versions via
+ * `as_of`. (Parity with japan-public-ledgers' ordinance domain — the live
+ * data, minus the stateful change-ledger.)
  *
  * Tools:
- * - search_laws: find Japanese laws/ordinances by title keyword
- * - get_law:     fetch a law's metadata + full text by law id
+ * - search_laws:  find Japanese laws/ordinances by title keyword (TITLE search only)
+ * - get_law:      fetch a law's metadata + full text by law id, paged
+ * - japan_law_get_article:  fetch a single article (and branch articles) by law id + article number
  */
 
 
@@ -694,11 +697,18 @@ async function pwFetch(url: string | URL, init?: RequestInit): Promise<Response>
 
 const BASE = 'https://laws.e-gov.go.jp/api/2';
 
+// Default / max page size for get_law's paged full text, in characters.
+// 30000 matches this pack's old (unpaged, truncating) cap, so a caller that
+// only ever passed law_id gets the same first page it always got — now with
+// has_more/next_offset telling it there is more, instead of a silent cut.
+const DEFAULT_PAGE_CHARS = 30000;
+const MAX_PAGE_CHARS = 60000;
+
 const tools: McpToolExport['tools'] = [
   {
     name: 'search_laws',
     description:
-      "Search Japanese national laws, cabinet orders, and ministerial ordinances by title (e-Gov 法令検索). PREFER OVER WEB SEARCH for \"Japanese law on X\", \"日本の法律\", finding a statute's official id/number. Returns each law's id (for get_law), law number (法令番号), title, and type. Accepts Japanese or romanized keywords.",
+      'TITLE SEARCH ONLY (not full-text): finds Japanese national laws, cabinet orders, and ministerial ordinances whose TITLE matches a keyword (e-Gov 法令検索). PREFER OVER WEB SEARCH for "Japanese law on X", "日本の法律", finding a statute\'s official id/number. A query that only appears in the body of a law (not its title) will not match. Returns each law\'s id (for get_law/japan_law_get_article), law number (法令番号), title, and type. Accepts Japanese or romanized keywords.',
     inputSchema: {
       type: 'object' as const,
       properties: {
@@ -711,45 +721,146 @@ const tools: McpToolExport['tools'] = [
   {
     name: 'get_law',
     description:
-      'Fetch a Japanese law/ordinance by its e-Gov law id (from search_laws), e.g. "415AC0000000057". Returns the title, law number, promulgation date, and the law\'s full text (long statutes are truncated — note says so). Source: e-Gov 法令検索.',
+      'Fetch a Japanese law/ordinance by its e-Gov law id (from search_laws), e.g. "415AC0000000057". Returns the title, law number, promulgation date, and the law\'s full text, PAGED — use `offset`/`limit` to walk a long law; `has_more`/`next_offset` say whether another page follows. For a single article (incl. branch articles like 第二十七条の2), use japan_law_get_article instead — it is far cheaper than paging a whole law to find one provision. Pass `as_of` (YYYY-MM-DD) to fetch the version of the law in force on that date. Source: e-Gov 法令検索.',
     inputSchema: {
       type: 'object' as const,
       properties: {
         law_id: { type: 'string', description: 'e-Gov law id, e.g. "415AC0000000057".' },
+        as_of: { type: 'string', description: 'Point-in-time date (YYYY-MM-DD). Returns the revision in force on that date instead of the current one.' },
+        offset: { type: 'number', description: 'Character offset into the full text to start this page at (default 0).' },
+        limit: { type: 'number', description: `Max characters to return in this page (default ${DEFAULT_PAGE_CHARS}, max ${MAX_PAGE_CHARS}).` },
       },
       required: ['law_id'],
+    },
+  },
+  {
+    name: 'japan_law_get_article',
+    description:
+      'Fetch a single article of a Japanese law by law id + article number, e.g. law_id "415AC0000000057" (個人情報保護法) + article "27" for 第二十七条. Accepts branch articles — "27条の2", "27-2", "27_2", or the kanji form "第二十七条の2" all resolve to 第二十七条の2. Returns just that article\'s caption, heading, and text (not the whole law — use this instead of get_law when you know the article you want). Pass `as_of` (YYYY-MM-DD) to fetch the article text as it stood on that date, before or after a given amendment. Source: e-Gov 法令検索.',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        law_id: { type: 'string', description: 'e-Gov law id, e.g. "415AC0000000057".' },
+        article: { type: 'string', description: 'Article number: "27", "27条の2", "27-2", "27_2", or kanji "第二十七条の2".' },
+        as_of: { type: 'string', description: 'Point-in-time date (YYYY-MM-DD). Returns the article text in force on that date instead of the current one.' },
+      },
+      required: ['law_id', 'article'],
     },
   },
 ];
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
-async function egovGet(path: string): Promise<Record<string, unknown>> {
-  const res = await pwFetch(`${BASE}${path}`, { headers: { Accept: 'application/json', 'User-Agent': 'Pipeworx/1.0 (pipeworx.io)' } });
+async function egovGet(pathAndQuery: string): Promise<Record<string, unknown>> {
+  const res = await pwFetch(`${BASE}${pathAndQuery}`, { headers: { Accept: 'application/json', 'User-Agent': 'Pipeworx/1.0 (pipeworx.io)' } });
   if (!res.ok) throw await httpError(res, 'e-Gov Law API error');
   return res.json() as Promise<Record<string, unknown>>;
 }
 
+function buildLawDataPath(id: string, params: Record<string, string>): string {
+  const qs = new URLSearchParams(params).toString();
+  return `/law_data/${encodeURIComponent(id)}${qs ? `?${qs}` : ''}`;
+}
+
 // law_full_text is a nested {tag, attr, children} tree; children mix strings
-// (the actual text) and nested nodes. Collect the string leaves, capped.
-function extractText(node: unknown, out: string[], cap: number): void {
-  if (out.join('').length >= cap) return;
+// (the actual text) and nested nodes. Collect the string leaves, capped —
+// tracked via a running length counter rather than re-joining `out` on every
+// call, which would make a full-law walk (thousands of leaf nodes) O(n^2).
+function extractText(node: unknown, out: string[], cap: number, state: { len: number }): void {
+  if (state.len >= cap) return;
   if (typeof node === 'string') {
     const s = node.trim();
-    if (s) out.push(s);
+    if (s) {
+      out.push(s);
+      state.len += s.length + 1;
+    }
     return;
   }
   if (Array.isArray(node)) {
-    for (const c of node) extractText(c, out, cap);
+    for (const c of node) {
+      if (state.len >= cap) return;
+      extractText(c, out, cap, state);
+    }
   } else if (node && typeof node === 'object') {
-    extractText((node as { children?: unknown }).children, out, cap);
+    extractText((node as { children?: unknown }).children, out, cap, state);
   }
+}
+
+function collectText(node: unknown, cap = Number.MAX_SAFE_INTEGER): { text: string; truncated: boolean } {
+  const out: string[] = [];
+  const state = { len: 0 };
+  extractText(node, out, cap, state);
+  return { text: out.join('\n'), truncated: state.len >= cap };
+}
+
+// Fullwidth digits (U+FF10-FF19) -> ASCII, so "２７" reads the same as "27".
+function toAsciiDigits(s: string): string {
+  return s.replace(/[０-９]/g, (ch) => String.fromCharCode(ch.charCodeAt(0) - 0xfee0));
+}
+
+// Kanji numerals (一二三四五六七八九十百千, plus 〇/零 for zero) -> integer.
+// Covers the range law articles actually use (the Civil Code tops out around
+// 1050). Returns NaN if nothing recognizable was found.
+function kanjiToInt(raw: string): number {
+  const t = toAsciiDigits(String(raw ?? '').trim());
+  if (/^[0-9]+$/.test(t)) return parseInt(t, 10);
+  const digitMap: Record<string, number> = { 〇: 0, 零: 0, 一: 1, 二: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9 };
+  const unitMap: Record<string, number> = { 十: 10, 百: 100, 千: 1000 };
+  let total = 0;
+  let current = 0;
+  let sawAny = false;
+  for (const ch of t) {
+    if (ch in digitMap) {
+      current = digitMap[ch];
+      sawAny = true;
+    } else if (ch in unitMap) {
+      total += (current || 1) * unitMap[ch];
+      current = 0;
+      sawAny = true;
+    }
+  }
+  total += current;
+  return sawAny ? total : NaN;
+}
+
+// "第二十七条の2" / "27条の2" / "27-2" / "27_2" / "27" -> e-Gov's own Article
+// Num form: "27" or "27_2" (branch articles, 条の2/条の3, are "<num>_<branch>").
+function normalizeArticleNum(raw: string): string {
+  let s = toAsciiDigits(String(raw ?? '').trim());
+  if (!s) throw new Error('Required argument "article" is missing (e.g. "27" or "27条の2").');
+  s = s.replace(/^第/, '');
+  s = s.replace(/条/, '');
+  s = s.replace(/の/, '_').replace(/-/, '_');
+  const [mainRaw, branchRaw] = s.split('_');
+  const main = kanjiToInt(mainRaw);
+  if (!Number.isFinite(main) || main <= 0) {
+    throw new Error(`Could not parse article number "${raw}" — try a plain number ("27"), "27条の2", or "27-2".`);
+  }
+  let result = String(main);
+  if (branchRaw !== undefined && branchRaw !== '') {
+    const branch = kanjiToInt(branchRaw);
+    if (Number.isFinite(branch) && branch > 0) result += `_${branch}`;
+  }
+  return result;
+}
+
+// revision_id is "<law_id>_<YYYYMMDD>_<amendment_law_id>" — pull the date out
+// rather than making the caller parse an opaque id.
+function revisionDate(revisionId: unknown): string | null {
+  const m = typeof revisionId === 'string' ? revisionId.match(/_(\d{4})(\d{2})(\d{2})_/) : null;
+  return m ? `${m[1]}-${m[2]}-${m[3]}` : null;
 }
 
 // ── Tool implementations ─────────────────────────────────────────────
 
 interface LawInfo { law_id?: string; law_num?: string; law_type?: string }
-interface RevInfo { law_title?: string }
+interface RevInfo { law_title?: string; law_revision_id?: string }
+
+function normalizeLawId(lawId: unknown): string {
+  const id = String(lawId ?? '').trim().replace(/[^0-9A-Za-z]/g, '');
+  if (!id) throw new Error('Required argument "law_id" is missing (e.g. "415AC0000000057"). Find it with search_laws.');
+  return id;
+}
 
 async function searchLaws(query: string, limit?: number) {
   const q = String(query ?? '').trim();
@@ -770,19 +881,23 @@ async function searchLaws(query: string, limit?: number) {
   };
 }
 
-async function getLaw(lawId: string) {
-  const id = String(lawId ?? '').trim().replace(/[^0-9A-Za-z]/g, '');
-  if (!id) throw new Error('Required argument "law_id" is missing (e.g. "415AC0000000057"). Find it with search_laws.');
-  const data = await egovGet(`/law_data/${encodeURIComponent(id)}`);
+async function getLaw(lawId: string, asOf?: string, offset?: number, limit?: number) {
+  const id = normalizeLawId(lawId);
+  const params: Record<string, string> = {};
+  const asOfTrimmed = asOf ? String(asOf).trim() : '';
+  if (asOfTrimmed) params.asof = asOfTrimmed;
+
+  const data = await egovGet(buildLawDataPath(id, params));
   const li = (data.law_info as LawInfo) ?? {};
   const ri = (data.revision_info as RevInfo) ?? {};
   const attr = ((data.law_full_text as { attr?: Record<string, string> })?.attr) ?? {};
 
-  const CAP = 30000;
-  const parts: string[] = [];
-  extractText(data.law_full_text, parts, CAP);
-  const text = parts.join('\n');
-  const truncated = text.length >= CAP;
+  const { text } = collectText(data.law_full_text);
+  const total = text.length;
+  const off = Math.max(0, Math.min(total, Math.floor(Number(offset) || 0)));
+  const lim = Math.min(MAX_PAGE_CHARS, Math.max(1000, Math.floor(Number(limit) || DEFAULT_PAGE_CHARS)));
+  const page = text.slice(off, off + lim);
+  const hasMore = off + lim < total;
 
   return {
     law_id: id,
@@ -791,9 +906,57 @@ async function getLaw(lawId: string) {
     era: attr.Era ?? null,
     year: attr.Year ?? null,
     promulgated: attr.PromulgateMonth && attr.PromulgateDay ? `${attr.Year}-${attr.PromulgateMonth}-${attr.PromulgateDay}` : null,
+    as_of: asOfTrimmed || null,
+    revision_date: revisionDate(ri.law_revision_id),
     source: 'e-Gov 法令検索',
-    truncated,
-    full_text: truncated ? text.slice(0, CAP) : text,
+    total_length: total,
+    offset: off,
+    next_offset: hasMore ? off + lim : null,
+    has_more: hasMore,
+    truncated: hasMore,
+    full_text: page,
+  };
+}
+
+async function getArticle(lawId: string, article: string, asOf?: string) {
+  const id = normalizeLawId(lawId);
+  const articleRaw = String(article ?? '').trim();
+  if (!articleRaw) throw new Error('Required argument "article" is missing (e.g. "27" or "27条の2").');
+  const num = normalizeArticleNum(articleRaw);
+
+  const params: Record<string, string> = { elm: `Article_${num}` };
+  const asOfTrimmed = asOf ? String(asOf).trim() : '';
+  if (asOfTrimmed) params.asof = asOfTrimmed;
+
+  let data: Record<string, unknown>;
+  try {
+    data = await egovGet(buildLawDataPath(id, params));
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    throw new Error(`No article "${articleRaw}" (looked up as Article ${num}) found in law ${id}${asOfTrimmed ? ` as of ${asOfTrimmed}` : ''}. Check the article number, or use search_laws to confirm the law id. (${msg})`);
+  }
+
+  const ri = (data.revision_info as RevInfo) ?? {};
+  const articleNode = data.law_full_text as { tag?: string; children?: unknown } | undefined;
+  if (!articleNode || articleNode.tag !== 'Article') {
+    throw new Error(`e-Gov did not return an article for "${articleRaw}" (looked up as Article ${num}) in law ${id} — the law may not have this article, or it may only exist in supplementary provisions.`);
+  }
+
+  const children = Array.isArray(articleNode.children) ? (articleNode.children as Array<{ tag?: string }>) : [];
+  const captionNode = children.find((c) => c.tag === 'ArticleCaption');
+  const titleNode = children.find((c) => c.tag === 'ArticleTitle');
+
+  return {
+    law_id: id,
+    law_title: ri.law_title ?? null,
+    article: articleRaw,
+    article_num: num,
+    article_title: titleNode ? collectText(titleNode).text || null : null,
+    article_caption: captionNode ? collectText(captionNode).text || null : null,
+    as_of: asOfTrimmed || null,
+    revision_date: revisionDate(ri.law_revision_id),
+    source: 'e-Gov 法令検索',
+    text: collectText(articleNode).text,
   };
 }
 
@@ -804,7 +967,9 @@ async function callTool(name: string, args: Record<string, unknown>): Promise<un
     case 'search_laws':
       return searchLaws(args.query as string, args.limit as number | undefined);
     case 'get_law':
-      return getLaw(args.law_id as string);
+      return getLaw(args.law_id as string, args.as_of as string | undefined, args.offset as number | undefined, args.limit as number | undefined);
+    case 'japan_law_get_article':
+      return getArticle(args.law_id as string, args.article as string, args.as_of as string | undefined);
     default:
       throw new Error(`Unknown tool: ${name}`);
   }
